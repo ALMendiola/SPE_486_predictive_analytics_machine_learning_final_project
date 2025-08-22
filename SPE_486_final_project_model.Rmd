@@ -1,0 +1,813 @@
+---
+title: "Can We Predict a Top Hit?"
+author: "Alfredo Lorenzo Mendiola and Quinn Bottomly"
+date: "28 December 2023"
+output: pdf_document
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+# load libraries and cleaned data
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(waldo)
+library(psych)
+library(parallel)
+library(doParallel)
+library(ggplot2)
+library(reshape2)
+library(GGally)
+library(knitr)
+library(kableExtra)
+library(gridExtra)
+library(grid)
+library(caret)
+library(randomForest)
+library(data.table)
+library(disk.frame)
+library(arrow)
+library(Metrics)
+library(xgboost)
+
+# directory for reading in data
+setwd("C:\\Users\\amend\\Documents\\School\\SPE_486_predictive_analytics_and_machine_learning\\SPE_486_final_project\\SPE_486_final_project_data_clean")
+
+hits <- read_csv("hits.csv")
+non_hits <- read_csv("non_hits.csv")
+
+# directory for saving plots and outputs from paper
+setwd("C:\\Users\\amend\\Documents\\School\\SPE_486_predictive_analytics_and_machine_learning\\SPE_486_final_project\\SPE_486_final_project_outputs")
+
+# add year_hit to non_hits to allow binding
+non_hits$year_hit <- 0
+
+# create 1 df for use
+all_hits <- rbind(non_hits, hits)
+```
+
+## Introduction
+
+Music and sound have been researched time and time again. A simple search in Google Scholar will yield plenty of reading for anyone interested in reading something different for a very long time. Music itself has been around for even longer. It is even said to be “as old as humanity itself. Archaeologists have found primitive flutes made of bone and ivory dating back as far as 43,000 years, and it’s likely that many ancient musical styles have been preserved in oral traditions.” (Andrews, 2023)
+
+There are clear aspects to tracks that can make them hits as opposed to being forgotten all together. One large aspect is the artist that puts out the song. There are certain artists with loyal fan bases that will play every track that artist creates and then are artists with loyal haters who will avoid certain tracks at all costs. For example, "Swifties" will repeatedly support and play Taylor Swift's tracks but some Eminem fans will completely avoid MGK tracks due to their previous 'beefing' with each other. Musicians also know that there are a few beats, tempos, and other factors that can help a track become popular to the masses but is not always a guarantee.
+
+Nowadays computational power and knowledge have greatly advanced from when the music industry began and continue to rapidly advance. If we could take the domain knowledge of artists and the computational power of machine learning (ML) and accurately predict what would make a track popular, we could essentially change the music industry forever. Whether this change would be a good or detrimental change is up to every individual person to decide. The music industry could become a 'cookie cutter' industry and ruin the creativeness aspect for musicians very quickly. This could also help other artists, who could navigate that space to give listeners something new to listen to, find a way that would change the 'cookie cutter' outline as new music is produced. This also provides the possibility that artists will make minor adjustments to their styles and sounds to match what is the current 'cookie cutter' outline but with their own flavor added to it. Essentially, the music industry would have to do what every human has had to do throughout history to survive. Adapt and overcome.
+
+
+## Research Question and Design
+
+**H0** It is possible to predict which songs will be Top Hits using the attributes that Spotify assigns to the tracks, at or above a 90% correct threshold.
+**H1** It is not possible to predict which songs will be Top Hits using the attributes that Spotify assigns to the tracks, at or above a 90% correct threshold.
+
+The data for this will need to be from a consistent source YoY. A large amount of tracks will need to be added to the dataset to be the non-hits and have the same attributes recorded as the hits. A large ratio of non-hits to hits will need to be kept in the data to avoid too many hits to non-hits causing it to skew the data. This also helps to simulate the music industry since there are millions of songs but very few of those become hits. Even less become Top Hits and make it as top 50/100/150 for the year.
+I will be running 4 models, 2 Random forests (RF) and 2 XGBoost. The first RF will include all features and no pruning so that I can use it for feature importance for my other models. I will then run a second RF where I top down prune and remove features. Then, I will run an XGBoost and leave all features in it and see how the models differ in F1 scores, accuracy and Type 1 and Type 2 errors. Lastly, I will use k folding to see how my XGBoost can improve and compare the models' F1 score to the others.
+
+
+## Data Overview
+
+Once I knew what I wanted to answer as my research question, I began to look for data to use in my research design. I mainly focused on different Spotify playlists that could fit my needs. I found that Spotify had 2 playlist series that would fit what I was looking for, 'Top Hits of XXXX' and 'Top Tracks of XXXX'. I looked for specification on how each playlist was curated, but could not find anything that concretely said how these playlist tracks were chosen. It did seem to be a consensus that 'Top Tracks of XXXX' was only based on Spotify streams while 'Top Hits of XXXX' were for the overall US market. To include the most popular songs of a certin year, I wanted to ensure the hits were not just based on Spotify streams alone. Some sources did say that the 'Top Hits of XXXX' were chosen for their overall popularity in the market, including radio play and other mediums of use, and not just on their streams on Spotify. So this playlist series looked to fit my research design the best.
+
+Once I found the playlists for 2011 to 2022 and recorded their unique playlist IDs, I pulled the data from the Spotify API in two steps. First, I used the playlist IDs in the spotifyr package function, get_playlist_tracks(), to get the tracks from the playlists. The data came organized and clean as expected. I only had to manipulate and prune the data to be in dataframes for my use. Second, I had to take the unique track IDs that I had gotten from the playlists and pulled individual track attributes from the Spotify API using the spotifyr package function, get_track_audio_features(). Once I had these two sets of data per year, I combined them using the unique track ID.
+
+For my data that would be for the non-hits, I found a dataset in Kaggle Datasets named 'Spotify 1.2M+ Songs' by Rodolfo Figueroa. It was a large dataset that had all of the track attributes that I had been looking for so I used this for my non-hits with minimal cleaning. I only had to make the variables names and formats match across datasets.
+
+For the cleaning of the data, I did a lot of unlisting and formating how chr variables would show up. I looked at ranges, for 'NA' and missing values, and values did not make sense and cleaned those to the best of my ability. To identify duplicate tracks, I used the unique track ID to eliminate the possibility of the track names being stored differently. I eliminated songs that were from the 'Top Hits of XXXX' playlists from the non-hits to ensure there were no hits in that dataset. I did not eliminate duplicate hits since I believe if a song appears as a hit in multiple years, it should carry a larger weight in the outcome.
+
+For certain variables, I either created or transformed them. I created a variable that would be the indicator for whether a track was a hit or a non-hit called 'hit' with a 1 (True) or 0 (False) value. I also created a numerical variable to account for all of the unique artist combinations based on the artist_ids column for analysis. I then changed explicit from a T/F logical variable to a 1/0 numerical variable for use in the analysis.
+
+When the data was cleaned and formatted correctly, I ended up with 25 variables (descriptions below) and 1,205,002 observations overall.
+
+The following are the variable descriptions per Spotify API:
+**id**
+The Spotify ID for the track.
+**name**
+The name of the track.
+**album**
+The name of the album. In case of an album takedown, the value may be an empty string.
+**album_id**
+The Spotify ID for the album.
+**artists**
+The name of the artist. (was cleaned from an array by me)
+**artist_ids**
+The Spotify ID for the artist. (was cleaned from an array by me)
+**track_number**
+The number of the track. If an album has several discs, the track number is the number on the specified disc.
+**disc_number**
+The disc number (usually 1 unless the album consists of more than one disc).
+**explicit**
+Whether or not the track has explicit lyrics ( true = yes it does; false = no it does not OR unknown).
+**danceability**
+Danceability describes how suitable a track is for dancing based on a combination of musical elements including tempo, rhythm stability, beat strength, and overall regularity. A value of 0.0 is least danceable and 1.0 is most danceable.
+**energy**
+Energy is a measure from 0.0 to 1.0 and represents a perceptual measure of intensity and activity. Typically, energetic tracks feel fast, loud, and noisy. For example, death metal has high energy, while a Bach prelude scores low on the scale. Perceptual features contributing to this attribute include dynamic range, perceived loudness, timbre, onset rate, and general entropy.
+**key**
+The key the track is in. Integers map to pitches using standard Pitch Class notation. E.g. 0 = C, 1 = C#/Db, 2 = D, and so on. If no key was detected, the value is -1.
+**loudness**
+The overall loudness of a track in decibels (dB). Loudness values are averaged across the entire track and are useful for comparing relative loudness of tracks. Loudness is the quality of a sound that is the primary psychological correlate of physical strength (amplitude). Values typically range between -60 and 0 db.
+**mode**
+Mode indicates the modality (major or minor) of a track, the type of scale from which its melodic content is derived. Major is represented by 1 and minor is 0.
+**speechiness**
+Speechiness detects the presence of spoken words in a track. The more exclusively speech-like the recording (e.g. talk show, audio book, poetry), the closer to 1.0 the attribute value. Values above 0.66 describe tracks that are probably made entirely of spoken words. Values between 0.33 and 0.66 describe tracks that may contain both music and speech, either in sections or layered, including such cases as rap music. Values below 0.33 most likely represent music and other non-speech-like tracks.
+**acousticness**
+A confidence measure from 0.0 to 1.0 of whether the track is acoustic. 1.0 represents high confidence the track is acoustic.
+**instrumentalness**
+Predicts whether a track contains no vocals. "Ooh" and "aah" sounds are treated as instrumental in this context. Rap or spoken word tracks are clearly "vocal". The closer the instrumentalness value is to 1.0, the greater likelihood the track contains no vocal content. Values above 0.5 are intended to represent instrumental tracks, but confidence is higher as the value approaches 1.0.
+**liveness**
+Detects the presence of an audience in the recording. Higher liveness values represent an increased probability that the track was performed live. A value above 0.8 provides strong likelihood that the track is live.
+**valence**
+A measure from 0.0 to 1.0 describing the musical positiveness conveyed by a track. Tracks with high valence sound more positive (e.g. happy, cheerful, euphoric), while tracks with low valence sound more negative (e.g. sad, depressed, angry).
+**tempo**
+The overall estimated tempo of a track in beats per minute (BPM). In musical terminology, tempo is the speed or pace of a given piece and derives directly from the average beat duration.
+**duration_ms**
+The duration of the track in milliseconds.
+**time_signature**
+An estimated time signature. The time signature (meter) is a notational convention to specify how many beats are in each bar (or measure). The time signature ranges from 3 to 7 indicating time signatures of "3/4", to "7/4".
+**year**
+The date the album was first released. (cleaned to be just the year for consistency reasons)
+**hit**
+indicator variable whether the song was in the "Top Hits of XXXX" playlists
+**year_hit**
+variable to see which "Top Hits of XXXX" playlists a track was in. 0 if it was not a hit.
+
+After going through my data and verifying validity or possible issues, I removed the following for various reasons:
+**id**
+This was used to keep track of unique observations during cleaning and is no longer needed for analysis.
+**name**
+This was used to keep track of unique observations during cleaning and is no longer needed for analysis.
+**album**
+This was used to keep track of unique observations during cleaning and is no longer needed for analysis.
+**album_id**
+This was used to keep track of unique observations during cleaning and is no longer needed for analysis.
+**artists**
+I used artist_ids in place of this to account for any possible differences in spelling.
+**track_number**
+A track's number on an album may have been a big reason for popularity back in the day, but now albums do not have to be played in order so the validity is lowered if I used this metric. This variable also had the issue of collaboration albums being made by Spotify affecting its post release information so the data is not consistent.
+**disc_number**
+This variable would only be different from 1 if there were multiple disks in the album. It makes sense with how music was released pre-internet, but now there are only '1 disk' releases. This caused a majority of the data to be a value of '1'.
+**time_signature**
+Per the Spotify API, this variable should have a range of 3-7. The data had a range of 0-5. At first I thought the 0 could mean there was not recording of it and the 1-5 were scaled versions of the 3-7. I could not find a way to prove this so I removed it from my analysis.
+**year**
+A song releasing at a certain time does have an impact on its popularity but there were issues with the data collected. For a major part of the data, only a year was listed. I also noticed while cleaning up years that did not make sense (0, 1900, etc.) that if a song was reuploaded to a new album collaboration by Spotify, the year for the track would be updated to that year. So it was not an accurate year of release either.
+**year_hit**
+This was a variable where more than 90% of my data would have a 0 since the non_hits dataset were assigned 0 by me.
+
+```{r, include=FALSE, warning=FALSE}
+# subset data for logical numerical use only now a.k.a. eliminate names, ids, etc.
+all_hits <- all_hits %>% select(-c(id, name, album, album_id, artists, track_number, disc_number, time_signature, year, year_hit))
+hits <- hits %>% select(-c(id, name, album, album_id, artists, track_number, disc_number, time_signature, year, year_hit))
+non_hits <- non_hits %>% select(-c(id, name, album, album_id, artists, track_number, disc_number, time_signature, year, year_hit))
+
+
+
+# convert explicit for analysis (TRUE = 1, FALSE = 0)
+hits$explicit <- as.numeric(hits$explicit)
+non_hits$explicit <- as.numeric(non_hits$explicit)
+all_hits$explicit <- as.numeric(all_hits$explicit)
+
+
+
+# turn artist_ids into numerical values for each unique combo of artist IDs
+# only done for all_hits to account for artists showing up in both hits and non_hits
+all_hits$artist_ids <- as.factor(all_hits$artist_ids)
+all_hits$artist_ids <- as.numeric(all_hits$artist_ids)
+```
+
+
+## EDA Description Statistics
+
+I began to look at my cleaned data with some statistics using summary() and describe(). I was looking for clear issues with the data and getting a general idea of the values and ranges.
+
+The following are summary statistics on the 3 datasets, hits, non-hits, and the combined dataset (all_hits):
+
+```{r, echo=FALSE, error = TRUE, warning=FALSE}
+# glance at the data
+summary(hits)
+summary(non_hits)
+summary(all_hits)
+```
+
+After looking at the summary statistics, I ran descriptive statistics of the 3 datasets, hits, non-hits, and the combined dataset (all_hits).
+
+```{r, include=FALSE, warning=FALSE}
+# run describe() on numeric cols only
+
+# Register parallel backend to use multiple cores at once
+registerDoParallel(cores = detectCores())
+
+# hits
+results_hits <- foreach(numCol = names(hits)[sapply(hits, is.numeric)], .combine='rbind') %dopar% {
+  result <- psych::describe(hits[[numCol]])
+  rownames(result) <- numCol
+  result
+}
+
+# non_hits
+results_non_hits <- foreach(numCol = names(non_hits)[sapply(non_hits, is.numeric)], .combine='rbind') %dopar% {
+  result <- psych::describe(non_hits[[numCol]])
+  rownames(result) <- numCol
+  result
+}
+
+# all_hits
+results_all_hits <- foreach(numCol = names(all_hits)[sapply(all_hits, is.numeric)], .combine='rbind') %dopar% {
+  result <- psych::describe(all_hits[[numCol]])
+  rownames(result) <- numCol
+  result
+}
+
+# Stop parallel backend
+stopImplicitCluster()
+```
+
+Descriptive Statistics Table for hits dataset:
+
+```{r, echo=FALSE, error = TRUE, warning=FALSE, out.width='\\textwidth', out.height=NULL}
+# create descriptive stat table for hits
+
+# Specify the column names to format
+columns_to_format <- c("mean", "sd", "median", "trimmed", "mad", "skew", "kurtosis", "se") 
+
+# Function to format specific columns in a dataframe
+format_specific_columns <- function(df, columns) {
+  df[, columns] <- lapply(df[, columns, drop = FALSE], function(x) format(x, digits = 4, nsmall = 3))
+  return(df)
+}
+
+# Apply the formatting function to specific columns of 'results_hits'
+formatted_results <- format_specific_columns(results_hits, columns_to_format)
+
+# Create the table graphic with formatted data
+table_plot1 <- tableGrob(formatted_results)
+
+# Save the table to a PDF
+pdf("results_hits.pdf", width = 13, height = 5)
+grid.draw(table_plot1)
+dev.off()
+
+# Display the table plot in R
+grid.draw(table_plot1)
+```
+
+Descriptive Statistics Table for non-hits dataset:
+
+```{r, echo=FALSE, error = TRUE, warning=FALSE, out.width='\\textwidth', out.height=NULL}
+# create descriptive stat table for non_hits
+
+# Clear the graphic device
+grid.newpage()
+
+# Specify the column names to format
+columns_to_format <- c("mean", "sd", "median", "trimmed", "mad", "skew", "kurtosis", "se") 
+
+# Function to format specific columns in a dataframe
+format_specific_columns <- function(df, columns) {
+  df[, columns] <- lapply(df[, columns, drop = FALSE], function(x) format(x, digits = 4, nsmall = 3))
+  return(df)
+}
+
+# Apply the formatting function to specific columns of 'results_non_hits'
+formatted_results <- format_specific_columns(results_non_hits, columns_to_format)
+
+# Create the table graphic with formatted data
+table_plot2 <- tableGrob(formatted_results)
+
+# Save the table to a PDF
+pdf("results_non_hits.pdf", width = 13, height = 5)
+grid.draw(table_plot2)
+dev.off()
+
+# Display the table plot in R
+grid.draw(table_plot2)
+```
+
+Descriptive Statistics Table for combined dataset (all_hits):
+
+```{r, echo=FALSE, error = TRUE, warning=FALSE, out.width='\\textwidth', out.height=NULL}
+# create descriptive stat table for all_hits
+
+# Clear the graphic device
+grid.newpage()
+
+# Specify the column names to format
+columns_to_format <- c("mean", "sd", "median", "trimmed", "mad", "skew", "kurtosis", "se") 
+
+# Function to format specific columns in a dataframe
+format_specific_columns <- function(df, columns) {
+  df[, columns] <- lapply(df[, columns, drop = FALSE], function(x) format(x, digits = 4, nsmall = 3))
+  return(df)
+}
+
+# Apply the formatting function to specific columns of 'results_all_hits'
+formatted_results <- format_specific_columns(results_all_hits, columns_to_format)
+
+# Create the table graphic with formatted data
+table_plot3 <- tableGrob(formatted_results)
+
+# Save the table to a PDF
+pdf("results_all_hits.pdf", width = 13, height = 5)
+grid.draw(table_plot3)
+dev.off()
+
+# Display the table plot in R
+grid.draw(table_plot3)
+```
+
+```{r, include=FALSE, warning=FALSE}
+# clean up memory
+rm(
+    table_plot1,
+    table_plot2,
+    table_plot3,
+    results_hits,
+    results_non_hits,
+    results_all_hits,
+    format_numeric_columns,
+    format_specific_columns,
+    columns_to_format,
+    formatted_results,
+    hits,
+    non_hits
+)
+```
+
+To look for relationships between variables I started off with a simple Correlation Heatmap for the combined dataset. I also wanted to create a scatterplot matrix to see how the variables interact with eat other, but I cannot create 1 scatterplot matrix for 1.2mil+ observations. So instead, I subset the data 10 times into 1200 observation datasets (rougly 0.1% of entire dataset) to see if there were consistent interactions. I did not look at each dataset individually since I need to see if there are any issues with the data as a whole. There might be different correlations in the hits dataset but I am interested in these correlations when combined with the non-hits as this is how I will be training and testing my models.
+
+```{r, echo=FALSE, error = TRUE, warning=FALSE}
+# Calculate the correlation matrix using 'complete.obs' to handle missing values (should not have any but just in case)
+cor_matrix_all_hits <- cor(all_hits, use = "complete.obs") 
+
+# Reshape the correlation matrix
+melted_cor_matrix_all_hits <- melt(cor_matrix_all_hits)
+
+# Create the heatmap
+corr_heatmap <- ggplot(melted_cor_matrix_all_hits, aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1, 1), space = "Lab", 
+                       name="Pearson\nCorrelation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 8, hjust = 1),
+        axis.text.y = element_text(size = 8)) +
+  labs(x = '', y = '', title = 'Correlation Matrix Heatmap - All')
+
+# print heatmap in R
+print(corr_heatmap)
+
+# Save the heatmap as a PNG file
+ggsave("correlation_heatmap_all_hits.png", plot = corr_heatmap, width = 8, height = 6)
+
+# clear up memory
+rm(
+    cor_matrix_all_hits,
+    melted_cor_matrix_all_hits,
+    corr_heatmap
+)
+```
+
+```{r, echo=FALSE, error = TRUE, results='asis', warning=FALSE}
+# create scatterplot matrix all_hits using subsets to account for large size
+
+# Function to create and return a scatterplot matrix for a given subset
+create_scatterplot_matrix <- function(df) {
+  ggpairs(df)
+}
+
+# Create 10 random subsets and generate scatterplot matrices
+for (i in 1:10) {
+  # Sample 1200 observations without replacement
+  subset <- all_hits %>% sample_n(1200)
+
+  # Create scatterplot matrix
+  plot <- create_scatterplot_matrix(subset)
+
+  # Save the plot
+  ggsave(paste("scatterplot_matrix_", i, ".png", sep=""), plot, width = 12, height = 12)
+
+  # Print the plot to view it
+  print(plot)
+}
+
+# clean up memory
+rm(
+    i,
+    create_scatterplot_matrix,
+    subset,
+    plot
+    )
+```
+
+Based on the Correlation Heatmap for the combined dataset, there are a few strong positive correlations and slightly more strong negative correlations.
+The variables with clear strong positive correlations are loudness and energy and a case can be made for valence and danceability.
+For the negative correlations, the variables acousticness and energy have a clearly strong correlation, as well as acousticness and loudness. Cases for strong negative correlations could also be made for the following variables, instrumentalness and danceability, instrumentalness and energy, instrumentalness and loudness, acousticness and danceability, valence and acousticness, valence and instrumentalness, and finally tempo and acousticness.
+
+Looking at the 10 Scatterplot Matrices for the combined dataset subsets, some clear relationships arise. Loudness and energy are highly correlated and tightly grouped making them prime candidates for feature reduction. Duration_ms has clear outliers in some of the subsets but in others it looks like there could be a higher density at the lower end of duration_ms but still a spread across the way to the outliers. This means I cannot remove the outliers entirely. Other variables were binomial and have it show clearly in the matrices, such as explicit, hit, and mode.
+
+Based on the relationships I saw I want to do feature selection after running my first RF with all features. I will use the Feature Importance values from model 1, specifically the Mean Decrease Accuracy metric, to chose which features to eliminate. Also, for the relationship of Loudness and energy, I will plan to remove one of them based on the lower feature importance value.
+
+
+## Model Description
+
+**Model 1**
+
+Model 1 is a classification RF with all 14 IVs included as features. The hit is what the model is trying to predict. The combined dataset is split into a 80% training dataset and a 20% test dataset. I am running 150 trees with no pruning occurring. I will then pull the feature importance values from this model and use those to prune Model 2.
+
+```{r, echo=FALSE, error = TRUE, warning=FALSE}
+# Ensure that 'hit' is a factor for RF
+df1 <- all_hits
+df1$hit <- as.factor(df1$hit)
+
+# for reproducibility
+set.seed(123) 
+
+# Split the data into training and testing sets
+training_indices1 <- sample(1:nrow(df1), 0.8 * nrow(df1))
+training_data1 <- df1[training_indices1, ]
+testing_data1 <- df1[-training_indices1, ]
+
+# Train a Random Forest model
+rf_model1 <- randomForest(hit ~ ., data = training_data1, importance = TRUE, ntree = 150)
+
+# Extract feature importance
+importance1 <- importance(rf_model1)
+
+# Create a dataframe for visualization
+feature_importance1 <- data.frame(Feature = rownames(importance1), Importance = importance1[, 'MeanDecreaseAccuracy'])
+
+# Sort by importance
+feature_importance1 <- feature_importance1 %>% arrange(desc(Importance))
+
+# Plotting feature importance
+model1_plot <- ggplot(feature_importance1, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  coord_flip() +
+  labs(title = "Model 1 Feature Importance in Predicting 'hit'", x = "Features", y = "Importance")
+
+# Display plot
+print(model1_plot)
+
+# Save the ggplot as a .png file
+ggsave("model1_feature_importance.png", plot = model1_plot, width = 8, height = 6)
+
+# Predict on the testing set
+prediction1 <- predict(rf_model1, testing_data1)
+
+# create a confusion matrix
+confusion_matrix1 <- table(Predicted = prediction1, Actual = testing_data1$hit)
+
+# Print the confusion matrix
+print(confusion_matrix1)
+
+# Calculate accuracy (for classification problem)
+accuracy1 <- sum(diag(confusion_matrix1)) / sum(confusion_matrix1)
+print(paste("Accuracy:", round(accuracy1, 4)))
+
+# Extracting the elements of the confusion matrix
+true_negatives1 <- confusion_matrix1['0', '0']  # Actual = 0, Predicted = 0
+false_negatives1 <- confusion_matrix1['0', '1'] # Actual = 1, Predicted = 0 (Type 1 Error)
+false_positives1 <- confusion_matrix1['1', '0'] # Actual = 0, Predicted = 1 (Type 2 Error)
+true_positives1 <- confusion_matrix1['1', '1']  # Actual = 1, Predicted = 1
+
+# Calculating Type 1 and Type 2 Errors
+type_1_error_rate1 <- false_positives1 / (true_negatives1 + false_positives1)
+type_2_error_rate1 <- false_negatives1 / (true_positives1 + false_negatives1)
+
+# Print the error rates
+print(paste("Type 1 Error Rate:", round(type_1_error_rate1, 4)))
+print(paste("Type 2 Error Rate:", round(type_2_error_rate1, 4)))
+
+# Calculate precision and recall
+precision1 <- true_positives1 / (true_positives1 + false_positives1)
+recall1 <- true_positives1 / (true_positives1 + false_negatives1)
+
+# Calculate F1 score
+f1_score1 <- 2 * (precision1 * recall1) / (precision1 + recall1)
+
+# Print the F1 score
+print(paste("F1 Score:", round(f1_score1, 4)))
+```
+
+**Model 1b**
+
+After looking at the feature importance values of Model 1, I decided to rerun it and eliminate instrumentalness since it showed it had a negative effect on the model when included. No other changes were made and the same seed was used to ensure the 'randomness' was replicated.
+
+```{r, echo=FALSE, error = TRUE, warning=FALSE}
+# Ensure that 'hit' is a factor for RF
+df1b <- all_hits %>% select(-instrumentalness)
+df1b$hit <- as.factor(df1b$hit)
+
+# for reproducibility
+set.seed(123) 
+
+# Split the data into training and testing sets
+training_indices1b <- sample(1:nrow(df1b), 0.8 * nrow(df1b))
+training_data1b <- df1b[training_indices1b, ]
+testing_data1b <- df1b[-training_indices1b, ]
+
+# Train a Random Forest model
+rf_model1b <- randomForest(hit ~ ., data = training_data1b, importance = TRUE, ntree = 150)
+
+# Extract feature importance
+importance1b <- importance(rf_model1b)
+
+# Create a dataframe for visualization
+feature_importance1b <- data.frame(Feature = rownames(importance1b), Importance = importance1b[, 'MeanDecreaseAccuracy'])
+
+# Sort by importance
+feature_importance1b <- feature_importance1b %>% arrange(desc(Importance))
+
+# Plotting feature importance
+model1b_plot <- ggplot(feature_importance1b, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  coord_flip() +
+  labs(title = "Model 1b Feature Importance in Predicting 'hit'", x = "Features", y = "Importance")
+
+# Display plot
+print(model1b_plot)
+
+# Save the ggplot as a .png file
+ggsave("model1b_feature_importance.png", plot = model1b_plot, width = 8, height = 6)
+
+# Predict on the testing set
+prediction1b <- predict(rf_model1b, testing_data1b)
+
+# create a confusion matrix
+confusion_matrix1b <- table(Predicted = prediction1b, Actual = testing_data1b$hit)
+
+# Print the confusion matrix
+print(confusion_matrix1b)
+
+# Calculate accuracy (for classification problem)
+accuracy1b <- sum(diag(confusion_matrix1b)) / sum(confusion_matrix1b)
+print(paste("Accuracy:", round(accuracy1b, 4)))
+
+# Extracting the elements of the confusion matrix
+true_negatives1b <- confusion_matrix1b['0', '0']  # Actual = 0, Predicted = 0
+false_negatives1b <- confusion_matrix1b['0', '1'] # Actual = 1, Predicted = 0 (Type 1 Error)
+false_positives1b <- confusion_matrix1b['1', '0'] # Actual = 0, Predicted = 1 (Type 2 Error)
+true_positives1b <- confusion_matrix1b['1', '1']  # Actual = 1, Predicted = 1
+
+# Calculating Type 1 and Type 2 Errors
+type_1_error_rate1b <- false_positives1b / (true_negatives1b + false_positives1b)
+type_2_error_rate1b <- false_negatives1b / (true_positives1b + false_negatives1b)
+
+# Print the error rates
+print(paste("Type 1 Error Rate:", round(type_1_error_rate1b, 4)))
+print(paste("Type 2 Error Rate:", round(type_2_error_rate1b, 4)))
+
+# Calculate precision and recall
+precision1b <- true_positives1b / (true_positives1b + false_positives1b)
+recall1b <- true_positives1b / (true_positives1b + false_negatives1b)
+
+# Calculate F1 score
+f1_score1b <- 2 * (precision1b * recall1b) / (precision1b + recall1b)
+
+# Print the F1 score
+print(paste("F1 Score:", round(f1_score1b, 4)))
+```
+
+**Model 2**
+
+Model 2 is my second RF where I deploy top down pruning by limiting the depth of the trees to 5. I left it at 5 to prevent overfitting after I eliminated features with importance values less than 10% from Model 1. I removed duration_ms, key, and mode. The feature duration_ms was the one that the scatterplot matrices showed was most likely filled with plenty of outliers so this was a good feature to remove. Key did not look to be correlated above 0.01 with any other features so it is essentially a dummy variable. Mode was a binomial variable and only statistically significantly correlated to key. This RF was also run with 150 trees.
+
+```{r, echo=FALSE, error = TRUE, results='asis', warning=FALSE}
+# remove features from all_hits for rf2
+df2 <- all_hits %>% select(-c(instrumentalness, duration_ms, key, mode))
+
+# Ensure that 'hit' is a factor for RF
+df2$hit <- as.factor(df2$hit)
+
+# for reproducibility
+set.seed(123) 
+
+# Split the data into training and testing sets
+training_indices2 <- sample(1:nrow(df2), 0.8 * nrow(df2))
+training_data2 <- df2[training_indices2, ]
+testing_data2 <- df2[-training_indices2, ]
+
+# Train a Random Forest model with 5 features per tree and 150 trees
+rf_model2 <- randomForest(hit ~ ., data = training_data2, importance = TRUE, ntree = 150, max_depth = 5)
+
+# Extract feature importance
+importance2 <- importance(rf_model2)
+
+# Create a dataframe for visualization
+feature_importance2 <- data.frame(Feature = rownames(importance2), Importance = importance2[, 'MeanDecreaseAccuracy'])
+
+# Sort by importance
+feature_importance2 <- feature_importance2 %>% arrange(desc(Importance))
+
+# Plotting feature importance
+model2_plot <- ggplot(feature_importance2, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  coord_flip() +
+  labs(title = "Model 2 Feature Importance in Predicting 'hit'", x = "Features", y = "Importance")
+
+# Display plot
+print(model2_plot)
+
+# Save the ggplot as a .png file
+ggsave("model2_feature_importance.png", plot = model2_plot, width = 8, height = 6)
+
+# Predict on the testing set
+prediction2 <- predict(rf_model2, testing_data2)
+
+# create a confusion matrix
+confusion_matrix2 <- table(Predicted = prediction2, Actual = testing_data2$hit)
+
+# Print the confusion matrix
+print(confusion_matrix2)
+
+# Calculate accuracy (for classification problem)
+accuracy2 <- sum(diag(confusion_matrix2)) / sum(confusion_matrix2)
+print(paste("Accuracy:", round(accuracy2, 4)))
+
+# Extracting the elements of the confusion matrix
+true_negatives2 <- confusion_matrix2['0', '0']  # Actual = 0, Predicted = 0
+false_negatives2 <- confusion_matrix2['0', '1'] # Actual = 1, Predicted = 0 (Type 1 Error)
+false_positives2 <- confusion_matrix2['1', '0'] # Actual = 0, Predicted = 1 (Type 2 Error)
+true_positives2 <- confusion_matrix2['1', '1']  # Actual = 1, Predicted = 1
+
+# Calculating Type 1 and Type 2 Errors
+type_1_error_rate2 <- false_positives2 / (true_negatives2 + false_positives2)
+type_2_error_rate2 <- false_negatives2 / (true_positives2 + false_negatives2)
+
+# Print the error rates
+print(paste("Type 1 Error Rate:", round(type_1_error_rate2, 4)))
+print(paste("Type 2 Error Rate:", round(type_2_error_rate2, 4)))
+
+# Calculate precision and recall
+precision2 <- true_positives2 / (true_positives2 + false_positives2)
+recall2 <- true_positives2 / (true_positives2 + false_negatives2)
+
+# Calculate F1 score
+f1_score2 <- 2 * (precision2 * recall2) / (precision2 + recall2)
+
+# Print the F1 score
+print(paste("F1 Score:", round(f1_score2, 4)))
+```
+
+
+**Model 3**
+
+Model 3 is a XGBoost with all features in it. I chose to leave all features to see if it would predict better than Model 1 with all features. I again used a 80% training and 20% testing split for the dataset. I tried a few different max depths for the trees but found that 12 was returning the higher F1 score. I did a 100 rounds for the model.
+
+```{r, echo=FALSE, error = TRUE, results='asis', warning=FALSE}
+df3 <- all_hits
+
+# For reproducibility
+set.seed(123)
+
+# split data by 80/20
+training_rows3 <- sample(1:nrow(df3), 0.8 * nrow(df3))
+training_data3 <- df3[training_rows3, ]
+testing_data3 <- df3[-training_rows3, ]
+
+# convert to DMatrix for XGBoost
+dtrain3 <- xgb.DMatrix(data = as.matrix(training_data3[-which(names(training_data3) == "hit")]), 
+                      label = training_data3$hit)
+dtest3 <- xgb.DMatrix(data = as.matrix(testing_data3[-which(names(testing_data3) == "hit")]), 
+                     label = testing_data3$hit)
+
+# set paramaters for XGBoost
+params3 <- list(
+  objective = "binary:logistic",
+  eval_metric = "logloss",
+  max_depth = 12,
+  eta = 0.3
+)
+
+# train XGBoost
+nrounds3 <- 100
+model3 <- xgboost(params = params3, data = dtrain3, nrounds = nrounds3)
+
+# test XGBoost
+pred3 <- predict(model3, dtest3)
+
+# Convert predictions to binary class (0 or 1)
+pred_class3 <- ifelse(pred3 > 0.5, 1, 0)
+
+# Generate a confusion matrix
+confusion_matrix3 <- table(Predicted = pred_class3, Actual = testing_data3$hit)
+
+# display confusion matrix
+print(confusion_matrix3)
+
+# Calculate accuracy
+accuracy3 <- sum(diag(confusion_matrix3)) / sum(confusion_matrix3)
+print(paste("Accuracy:", round(accuracy3, 4)))
+
+# Extracting the elements of the confusion matrix
+true_negatives3 <- confusion_matrix3['0', '0']  # Actual = 0, Predicted = 0
+false_negatives3 <- confusion_matrix3['0', '1'] # Actual = 1, Predicted = 0 (Type 1 Error)
+false_positives3 <- confusion_matrix3['1', '0'] # Actual = 0, Predicted = 1 (Type 2 Error)
+true_positives3 <- confusion_matrix3['1', '1']  # Actual = 1, Predicted = 1
+
+# Calculating Type 1 and Type 2 Errors
+type_1_error_rate3 <- false_positives3 / (true_negatives3 + false_positives3)
+type_2_error_rate3 <- false_negatives3 / (true_positives3 + false_negatives3)
+
+# Print the error rates
+print(paste("Type 1 Error Rate:", round(type_1_error_rate3, 4)))
+print(paste("Type 2 Error Rate:", round(type_2_error_rate3, 4)))
+
+# Calculate precision and recall
+precision3 <- true_positives3 / (true_positives3 + false_positives3)
+recall3 <- true_positives3 / (true_positives3 + false_negatives3)
+
+# Calculate F1 score
+f1_score3 <- 2 * (precision3 * recall3) / (precision3 + recall3)
+
+# Print the F1 score
+print(paste("F1 Score:", round(f1_score3, 4)))
+```
+
+
+**Model 4**
+
+Model 4 is the second XGBoost that I ran. This one was combined with k folding to get an average F1 score and see if averaging across multiple XGBoost would result in a higher F1 score. I did 5 folds and set the tree depth to 6 to prevent too much overfitting. As with Model 3, I left all features in for Model 4 and did 100 rounds for the model.
+
+```{r, echo=FALSE, error = TRUE, results='asis', warning=FALSE}
+# Convert data to matrix format
+data_matrix4 <- as.matrix(all_hits[-which(names(all_hits) == "hit")])
+labels4 <- all_hits$hit
+
+# Create 5 folds
+set.seed(123)
+folds4 <- createFolds(labels4, k = 5, list = TRUE, returnTrain = FALSE)
+
+# Set XGBoost parameters
+params4 <- list(
+  objective = "binary:logistic",
+  eval_metric = "logloss",
+  max_depth = 6,
+  eta = 0.3
+)
+
+# Initialize variables to store precision, recall, and F1 scores
+precisions4 <- recalls4 <- f1_scores4 <- numeric(length(folds4))
+
+# Perform 5-fold cross-validation
+for(i in seq_along(folds4)) {
+  # Split the data
+  train_indices4 <- setdiff(1:nrow(data_matrix4), folds4[[i]])
+  dtrain4 <- xgb.DMatrix(data = data_matrix4[train_indices4, ], label = labels4[train_indices4])
+  dtest4 <- xgb.DMatrix(data = data_matrix4[folds4[[i]], ], label = labels4[folds4[[i]]])
+
+  # Train the model
+  model4 <- xgboost(params = params4, data = dtrain4, nrounds = 100)
+
+  # Predict on the test set
+  pred4 <- predict(model4, dtest4)
+  pred_class4 <- ifelse(pred4 > 0.5, 1, 0)
+
+  # Calculate metrics
+  cm4 <- confusionMatrix(as.factor(pred_class4), as.factor(labels4[folds4[[i]]]))
+  precisions4[i] <- cm4$byClass['Precision']
+  recalls4[i] <- cm4$byClass['Recall']
+  f1_scores4[i] <- 2 * (precisions4[i] * recalls4[i]) / (precisions4[i] + recalls4[i])
+}
+
+# Calculate the average F1 score
+mean_f1_score4 <- mean(f1_scores4, na.rm = TRUE)
+print(paste("Average F1 Score:", round(mean_f1_score4, 4)))
+```
+
+## Analysis
+
+The F1 scores were 0.1318 for Model 1, 0.1245 for Model 1b, 0.1181 for Model 2, and 0.1212 for Model 3.
+The accuracy of the models was 0.9991 for Model 1, 0.9991 for Model 1b, 0.9991 for Model 2, and 0.9990 for Model 3.
+The precision for the models was 0.5862 for Model 1, 0.5714 for Model 1b, 0.6000 for Model 2, and 0.4571 for Model 3.
+The recall for the models was 0.0742 for Model 1, 0.0699 for Model 1b, 0.0655 for Model 2, and 0.0699 for Model 3.
+All of these are extremely close to each other and the Type 1 and Type 2 errors were no different. When taking all of these into account, Model 1 still looks to perform the best when it comes to prediction.
+Model 4 I ran after looking at my results from the first 4 models and it had an average F1 score of 0.9995 with a balanced accuracy of 0.5170. I am skeptical of this result as the only real difference between Model 4 and Model 3 is the 5 k-folds that I performed. I do not see k-folding improving my model's performance from an F1 score of 0.0699 to 0.9995.
+Due to the overall metrics and my skepticism of Model 4's metrics, I reject my null hypothesis. I was not able to find a model that could accurately predict if a song is a Top Hit above 90%.
+
+
+## Limitations and Issues
+
+A clear limitation that arose early on was the size of my datasets. I had over 1.2 million observations and 25 variables at the beginning. This caused issues with being able to sift through the data for every outlier and possible issue within observations. It also made it impossible to do multiple visualizations without sub-setting to extremely small subsets. These subsets are so small that I would have needed at least 100 to feel comfortable that most of trends in the data were being captured by the subsets. The size also put limitations on what I could do computational on a laptop. I am fortunate to have had a very powerful laptop because if I had not, it would have been more difficult than it already was.
+
+An issue that I noticed when running the models is that the amount of non-hits to hits may have skewed the models to prefer to just predict a non-hit to keep overall accuracy higher. The ratio of 1 hit to 10 non-hits may have been too large for this project.
+
+Another issue I realize now is that the data collection is flawed. I took songs that were in the 'Top Hits of XXXX' playlists and these were clearly all top hits. But, when taking the non-hits into account, there are most likely a large amount of tracks that were also hits but did not make the playlists due to the limitation of 100 or so tracks. These tracks in the non-hits would still show attribute values and trends similar to the top hits tracks and cause the non-hits variables to not have enough distance from the hits variables for the models to find. Every model had the issue of False Negatives being extremely high and I believe it is due to this reasoning. However, there are some tracks every so often that become massively popular and I believe these are the ones that the models accurately got as True Positives.
+
+
+## Future Work Possibilities
+
+Per the Spotify API terms and conditions, nothing can be taken to produce a ML algorithm. I have used this just for personal training and interests and do not intend to work on this further. I do believe that Spotify has these terms in place because they are working on something in house. Spotify is well known for its custom playlists tailored to individual users and I believe they do not want the external competition.
+Just recently in December 2023, they released an AI called DJ that plays a personalized radio station for the individual user. This is exactly what I assumed was occurring in house at Spotify and I believe they are working on even more complex algorithms as well.
+
+
+## Resources
+
+AB, S. (2023). About Spotify. Retrieved from For the Record: https://newsroom.spotify.com/company-info/
+AB, S. (2023). Loud&Clear. Retrieved from byspotify: https://loudandclear.byspotify.com/
+AB, S. (2023). Web API. Retrieved from Spotify for Developers: https://developer.spotify.com/documentation/web-api
+Andrews, E. (2023, August 8). What Is the Oldest Known Piece of Music? Retrieved from History: https://www.history.com/news/what-is-the-oldest-known-piece-of-music
+Antal, D. (2022, December 15). spotifyr. Retrieved from RDocumentation: https://www.rdocumentation.org/packages/spotifyr/versions/2.2.4
+Maci. (2023, August 24). Spotify Facts. Retrieved from FACTS.NET: https://facts.net/spotify-facts/
+Ward, T. (2017, July 31). How Do Songs End Up On Spotify Playlists Anyway? Retrieved from Forbes: https://www.forbes.com/sites/tomward/2017/07/31/how-do-songs-end-up-on-spotify-playlists-anyway/?sh=1623fc0cbbb7
